@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8" />
+    <title>⚖️LegiChat</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+    <div class="sidebar">
+        <h2>LegiChat</h2>
+        <ul>
+            <li class="active">Accueil</li>
+            <li>Documents</li>
+            <li>Aide</li>
+            <li>À propos</li>
+        </ul>
+        <button id="reset-button">Réinitialiser</button>
+    </div>
+
+    <div class="main-area">
+        <div class="chat-header">LegiChat</div>
+        <div id="chat" class="chat-box"></div>
+        <div class="input-area">
+            <input type="text" id="question" placeholder="Posez votre question..." autofocus autocomplete="off" />
+            <button id="ask-button">Envoyer</button>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
