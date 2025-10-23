@@ -61,6 +61,42 @@ textes = df["texte"].tolist()
 
 
 # ==========================================================
+# 💬 Patterns conversationnels
+# ==========================================================
+CONVERSATIONAL_PATTERNS = [
+    r'^(bonjour|salut|bonsoir|hello|hi|hey)',
+    r'^(merci|thanks|au revoir|bye|adieu)',
+    r'^(comment ça va|ça va|comment vas-tu)',
+    r'^(ok|d\'accord|compris|entendu)',
+    r'^(qui es-tu|tu es qui|qui êtes-vous)',
+    r'^(quel est ton nom|comment tu t\'appelles)',
+]
+
+CONVERSATIONAL_RESPONSES = {
+    "greeting": [
+        "Bonjour ! Je suis votre assistant juridique spécialisé en droit burkinabè. Comment puis-je vous aider aujourd'hui ?",
+        "Salut ! Je suis là pour répondre à vos questions juridiques concernant le Burkina Faso. Que puis-je faire pour vous ?"
+    ],
+    "thanks": [
+        "Je vous en prie ! N'hésitez pas si vous avez d'autres questions juridiques.",
+        "Avec plaisir ! Je reste à votre disposition pour toute autre question."
+    ],
+    "goodbye": [
+        "Au revoir ! À bientôt pour vos prochaines questions juridiques.",
+        "À bientôt ! N'hésitez pas à revenir si vous avez besoin d'aide."
+    ],
+    "identity": [
+        "Je suis un assistant juridique spécialisé dans le droit du Burkina Faso. Je peux vous aider à comprendre les lois, décrets et arrêtés burkinabè.",
+        "Je suis votre assistant pour les questions juridiques relatives au Burkina Faso, basé sur les documents officiels du pays."
+    ],
+    "default": [
+        "Je suis là pour vous aider. Posez-moi vos questions juridiques concernant le Burkina Faso.",
+        "Comment puis-je vous assister dans vos recherches juridiques ?"
+    ]
+}
+
+
+# ==========================================================
 # 🛠️ Fonctions utilitaires
 # ==========================================================
 def preprocess_image(pil_img):
@@ -138,6 +174,96 @@ def rechercher_dans_metadatas(type_texte, numero, metadatas):
     return None
 
 
+def is_conversational_message(message):
+    """
+    Détecte si un message est conversationnel (salutations, remerciements, etc.)
+    plutôt qu'une vraie question juridique.
+
+    Args:
+        message: Le message utilisateur
+
+    Returns:
+        tuple: (bool is_conversational, str conversation_type)
+    """
+    message_lower = message.lower().strip()
+
+    # Messages très courts (< 15 caractères) sont probablement conversationnels
+    if len(message_lower) < 15:
+        # Détecter le type spécifique
+        if re.match(r'^(bonjour|salut|bonsoir|hello|hi|hey)', message_lower):
+            return True, "greeting"
+        elif re.match(r'^(merci|thanks)', message_lower):
+            return True, "thanks"
+        elif re.match(r'^(au revoir|bye|adieu)', message_lower):
+            return True, "goodbye"
+        elif re.match(r'^(ok|d\'accord|compris|entendu)', message_lower):
+            return True, "default"
+
+    # Vérifier les patterns spécifiques
+    for pattern in CONVERSATIONAL_PATTERNS:
+        if re.match(pattern, message_lower):
+            # Déterminer le type
+            if any(word in message_lower for word in ["bonjour", "salut", "bonsoir", "hello", "hi", "hey"]):
+                return True, "greeting"
+            elif any(word in message_lower for word in ["merci", "thanks"]):
+                return True, "thanks"
+            elif any(word in message_lower for word in ["au revoir", "bye", "adieu"]):
+                return True, "goodbye"
+            elif any(word in message_lower for word in ["qui es-tu", "tu es qui", "qui êtes-vous", "ton nom", "t'appelles"]):
+                return True, "identity"
+            elif any(word in message_lower for word in ["comment ça va", "ça va"]):
+                return True, "greeting"
+            else:
+                return True, "default"
+
+    return False, None
+
+
+def generate_conversational_response(conversation_type):
+    """
+    Génère une réponse conversationnelle appropriée.
+
+    Args:
+        conversation_type: Type de conversation (greeting, thanks, goodbye, identity, default)
+
+    Returns:
+        str: Réponse conversationnelle
+    """
+    import random
+
+    responses = CONVERSATIONAL_RESPONSES.get(conversation_type, CONVERSATIONAL_RESPONSES["default"])
+    return random.choice(responses)
+
+
+def validate_response(response, response_type, sources):
+    """
+    Valide et nettoie une réponse avant de l'envoyer.
+
+    Args:
+        response: Le texte de la réponse
+        response_type: Type de réponse
+        sources: Liste des sources
+
+    Returns:
+        tuple: (cleaned_response, cleaned_sources)
+    """
+    # Nettoyer la réponse
+    cleaned_response = response.strip()
+
+    # Remplacer les tableaux vides par None
+    cleaned_sources = None if not sources or len(sources) == 0 else sources
+
+    # Si on a des sources, les nettoyer
+    if cleaned_sources:
+        for source in cleaned_sources:
+            # Convertir les scores de pertinence en pourcentages
+            if "relevance" in source and source["relevance"] is not None:
+                # Convertir 0.95 en 95
+                source["relevance"] = round(source["relevance"] * 100, 1)
+
+    return cleaned_response, cleaned_sources
+
+
 def encodeur(question):
     return encoder_model.encode(question)
 
@@ -197,6 +323,13 @@ def process_question_with_context(conversation_id, new_message):
     Returns:
         tuple: (réponse de l'assistant, type de réponse, sources utilisées)
     """
+    # 🚀 OPTIMISATION 1 : Vérifier d'abord si c'est un message conversationnel
+    # (évite les recherches FAISS inutiles pour les "Bonjour", "Merci", etc.)
+    is_conversational, conv_type = is_conversational_message(new_message)
+    if is_conversational:
+        response = generate_conversational_response(conv_type)
+        return response, "conversational", None
+
     # Récupérer l'historique de la conversation
     history = conversations_history[conversation_id]
 
@@ -224,7 +357,7 @@ def process_question_with_context(conversation_id, new_message):
             sources = [{"type": type_texte, "numero": numero, "lien": lien_pdf}]
             return response, "document_link", sources
         else:
-            return "❌ Référence non trouvée dans les métadonnées.", "not_found", []
+            return "❌ Référence non trouvée dans les métadonnées.", "not_found", None
 
     # === Cas résumé (si l'utilisateur répond oui après une recherche de doc) ===
     if new_message.lower() in ["oui", "oui merci", "résume", "résume-moi", "je veux un résumé"]:
@@ -255,7 +388,7 @@ def process_question_with_context(conversation_id, new_message):
                 }]
                 return summary, "document_summary", sources
             except Exception as e:
-                return f"❌ Impossible de générer le résumé : {str(e)}", "error", []
+                return f"❌ Impossible de générer le résumé : {str(e)}", "error", None
 
     # === Cas demande explicative (RAG avec FAISS) ===
     question_embedding = encodeur(new_message)
@@ -364,16 +497,19 @@ def api_chat():
         # 3. Traiter la question avec contexte et récupérer les métadonnées
         ai_response, response_type, sources = process_question_with_context(conversation_id, message)
 
-        # 4. Générer un ID pour le message assistant
+        # 4. Valider et nettoyer la réponse (convertir relevance en %, remplacer [] par None)
+        ai_response, sources = validate_response(ai_response, response_type, sources)
+
+        # 5. Générer un ID pour le message assistant
         assistant_message_id = generate_message_id()
 
-        # 5. Sauvegarder la réponse dans l'historique
+        # 6. Sauvegarder la réponse dans l'historique
         conversations_history[conversation_id].append({
             "role": "assistant",
             "content": ai_response
         })
 
-        # 6. Retourner la réponse structurée au format attendu par le frontend
+        # 7. Retourner la réponse structurée au format attendu par le frontend
         response_data = {
             "id": assistant_message_id,
             "conversationId": conversation_id,
