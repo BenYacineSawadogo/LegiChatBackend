@@ -195,7 +195,7 @@ def process_question_with_context(conversation_id, new_message):
         new_message: Nouveau message utilisateur
 
     Returns:
-        str: Réponse de l'assistant
+        tuple: (réponse de l'assistant, type de réponse, sources utilisées)
     """
     # Récupérer l'historique de la conversation
     history = conversations_history[conversation_id]
@@ -221,9 +221,10 @@ def process_question_with_context(conversation_id, new_message):
                 "type_texte": type_texte,
                 "numero": numero
             })
-            return response
+            sources = [{"type": type_texte, "numero": numero, "lien": lien_pdf}]
+            return response, "document_link", sources
         else:
-            return "❌ Référence non trouvée dans les métadonnées."
+            return "❌ Référence non trouvée dans les métadonnées.", "not_found", []
 
     # === Cas résumé (si l'utilisateur répond oui après une recherche de doc) ===
     if new_message.lower() in ["oui", "oui merci", "résume", "résume-moi", "je veux un résumé"]:
@@ -242,16 +243,29 @@ def process_question_with_context(conversation_id, new_message):
                 texte_complet = extract_text_from_pdf(chemin_pdf)
                 prompt_messages = [
                     {
+                        "role": "system",
+                        "content": "Tu es un assistant juridique spécialisé dans les textes juridiques du Burkina Faso. Tu dois faire des résumés clairs, structurés et factuels."
+                    },
+                    {
                         "role": "user",
                         "content": (
-                            f"Voici le contenu d'un texte juridique :\n\n{texte_complet}\n\n"
-                            "Fais un résumé clair et structuré de ce document."
+                            f"Voici le contenu d'un texte juridique burkinabè :\n\n{texte_complet}\n\n"
+                            "Fais un résumé structuré de ce document en présentant :\n"
+                            "1. L'objet du texte\n"
+                            "2. Les points clés\n"
+                            "3. Les dispositions importantes"
                         )
                     }
                 ]
-                return generate_mistral_complete(prompt_messages)
+                summary = generate_mistral_complete(prompt_messages)
+                sources = [{
+                    "type": last_reference.get("type_texte"),
+                    "numero": last_reference.get("numero"),
+                    "lien": last_reference["lien"]
+                }]
+                return summary, "document_summary", sources
             except Exception as e:
-                return f"❌ Impossible de générer le résumé : {str(e)}"
+                return f"❌ Impossible de générer le résumé : {str(e)}", "error", []
 
     # === Cas demande explicative (RAG avec FAISS) ===
     question_embedding = encodeur(new_message)
@@ -259,13 +273,38 @@ def process_question_with_context(conversation_id, new_message):
     top_k = np.argsort(sims)[-10:][::-1]
     articles_selectionnes = [textes[i] for i in top_k]
 
+    # Extraire les noms de documents sources pour les métadonnées
+    sources = []
+    for i in top_k:
+        texte = textes[i]
+        # Extraire le nom du document (première partie avant "article")
+        doc_name = texte.split(" article ")[0] if " article " in texte else "Document juridique"
+        if doc_name not in [s.get("document") for s in sources]:
+            sources.append({"document": doc_name, "relevance": float(sims[i])})
+
+    # Limiter à 5 sources principales
+    sources = sources[:5]
+
     contexte = "\n\n".join(articles_selectionnes)
 
     # Construire l'historique de messages pour Mistral
     mistral_messages = [
         {
             "role": "system",
-            "content": "Tu es un assistant juridique spécialisé en droit sénégalais. Réponds de manière précise en citant les articles et les lois utilisés."
+            "content": """Tu es un assistant juridique spécialisé en droit burkinabè (Burkina Faso).
+
+RÈGLES STRICTES :
+1. Utilise UNIQUEMENT les informations du contexte juridique fourni ci-dessous
+2. Ne JAMAIS inventer ou supposer des informations qui ne sont pas dans le contexte
+3. Si l'information demandée n'est pas dans le contexte, réponds : "Je n'ai pas trouvé cette information dans les textes juridiques disponibles du Burkina Faso"
+4. Cite PRÉCISÉMENT les articles, lois, décrets et arrêtés du Burkina Faso en utilisant leur numéro exact
+5. Structure tes réponses clairement avec des paragraphes et des sections
+
+FORMAT DE RÉPONSE :
+- Commence par une réponse directe à la question
+- Cite les références légales exactes (ex: "Selon l'article 5 de l'arrêté n°016/2023")
+- Utilise des paragraphes distincts pour chaque point
+- Sois précis, factuel et professionnel"""
         }
     ]
 
@@ -280,10 +319,11 @@ def process_question_with_context(conversation_id, new_message):
     # Ajouter le nouveau message avec le contexte
     mistral_messages.append({
         "role": "user",
-        "content": f"Contexte juridique :\n{contexte}\n\nQuestion : {new_message}"
+        "content": f"CONTEXTE JURIDIQUE (Burkina Faso) :\n{contexte}\n\nQUESTION : {new_message}\n\nRappel : Utilise UNIQUEMENT les informations du contexte ci-dessus."
     })
 
-    return generate_mistral_complete(mistral_messages)
+    response = generate_mistral_complete(mistral_messages)
+    return response, "legal_answer", sources
 
 
 # ==========================================================
@@ -344,8 +384,8 @@ def api_chat():
             "content": message
         })
 
-        # 3. Traiter la question avec contexte
-        ai_response = process_question_with_context(conversation_id, message)
+        # 3. Traiter la question avec contexte et récupérer les métadonnées
+        ai_response, response_type, sources = process_question_with_context(conversation_id, message)
 
         # 4. Générer un ID pour le message assistant
         assistant_message_id = generate_message_id()
@@ -356,13 +396,18 @@ def api_chat():
             "content": ai_response
         })
 
-        # 6. Retourner la réponse au format attendu par le frontend
+        # 6. Retourner la réponse structurée au format attendu par le frontend
         response_data = {
             "id": assistant_message_id,
             "conversationId": conversation_id,
             "content": ai_response,
             "role": "assistant",
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "metadata": {
+                "responseType": response_type,
+                "country": "Burkina Faso",
+                "sources": sources
+            }
         }
 
         return jsonify(response_data), 200

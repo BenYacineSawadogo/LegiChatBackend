@@ -3,7 +3,8 @@
 **Base URL**: `http://localhost:5000`
 **Backend**: Flask + Mistral AI + FAISS
 **Frontend**: Angular 20
-**Last Updated**: 2025-10-22
+**Legal Context**: **Burkina Faso** (arrêtés, décrets, lois burkinabè)
+**Last Updated**: 2025-10-23
 
 ---
 
@@ -68,6 +69,17 @@ interface ChatResponse {
   content: string;         // AI response (HTML may be present for links)
   role: "assistant";       // Always "assistant"
   timestamp: string;       // ISO 8601 format (e.g., "2025-10-22T14:30:01.000Z")
+  metadata: {
+    responseType: string;  // "legal_answer" | "document_link" | "document_summary" | "not_found"
+    country: string;       // Always "Burkina Faso"
+    sources: Array<{       // Legal documents used in the response
+      document?: string;   // Document name (e.g., "ARRETE_016_2023_ALT")
+      relevance?: number;  // Relevance score (0-1)
+      type?: string;       // Document type (e.g., "loi", "décret")
+      numero?: string;     // Document number
+      lien?: string;       // PDF link
+    }>;
+  };
 }
 ```
 
@@ -76,9 +88,17 @@ interface ChatResponse {
 {
   "id": "msg-1729459201-xyz789",
   "conversationId": "conv-1729459200-k8j3h2l9q",
-  "content": "Pour créer une entreprise au Sénégal, vous devez suivre les étapes suivantes : 1. Obtenir un numéro NINEA...",
+  "content": "Selon l'article 1 de l'arrêté n°016/2023, les aéroports de Ouagadougou et de Bobo-Dioulasso sont ouverts au trafic aérien international...",
   "role": "assistant",
-  "timestamp": "2025-10-22T14:30:01.000Z"
+  "timestamp": "2025-10-23T14:30:01.000Z",
+  "metadata": {
+    "responseType": "legal_answer",
+    "country": "Burkina Faso",
+    "sources": [
+      {"document": "ARRETE_016_2023_ALT", "relevance": 0.95},
+      {"document": "DECRET_2022_0056", "relevance": 0.82}
+    ]
+  }
 }
 ```
 
@@ -144,6 +164,48 @@ Frontend displays response with context
 ```
 
 **Key Point**: Backend maintains conversation context automatically when you use the same `conversationId`.
+
+---
+
+## 📊 Response Types
+
+Le backend retourne différents types de réponses identifiés par `metadata.responseType` :
+
+### Types de Réponses
+
+| responseType | Description | Usage Frontend |
+|--------------|-------------|----------------|
+| `legal_answer` | Réponse juridique basée sur RAG (FAISS + Mistral) | Afficher comme texte formaté avec citations |
+| `document_link` | Lien vers un document PDF | Afficher le lien + bouton télécharger |
+| `document_summary` | Résumé d'un document juridique | Afficher avec mise en forme spéciale (sections) |
+| `not_found` | Information non trouvée dans la base | Afficher comme message d'avertissement |
+
+### Utilisation des Sources
+
+Le champ `metadata.sources` contient les documents juridiques utilisés :
+- **Pour `legal_answer`** : Liste des arrêtés/décrets/lois consultés avec score de pertinence
+- **Pour `document_link`** : Document demandé avec lien PDF
+- **Pour `document_summary`** : Document source du résumé
+
+**Exemple Frontend (Angular)** :
+```typescript
+displayMessage(response: ChatResponse) {
+  switch (response.metadata.responseType) {
+    case 'legal_answer':
+      this.renderLegalAnswer(response.content, response.metadata.sources);
+      break;
+    case 'document_link':
+      this.renderDocumentLink(response.content);
+      break;
+    case 'document_summary':
+      this.renderSummary(response.content, response.metadata.sources);
+      break;
+    case 'not_found':
+      this.renderWarning(response.content);
+      break;
+  }
+}
+```
 
 ---
 

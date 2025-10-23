@@ -9,7 +9,9 @@
 - **Backend**: Flask on `http://localhost:5000`
 - **Frontend**: Angular 20 on `http://localhost:4200`
 - **Endpoint**: `POST /api/chat`
+- **Context**: **Burkina Faso** legal documents (not Senegal!)
 - **Data Flow**: Frontend generates `conversationId` → Backend maintains conversation context
+- **AI Model**: Mistral AI with RAG (FAISS) - uses ONLY provided legal context
 
 ---
 
@@ -30,7 +32,14 @@ Content-Type: application/json
   "conversationId": "conv-...",                  // Same as request
   "content": "AI response text (may contain HTML links)",
   "role": "assistant",
-  "timestamp": "2025-10-22T14:30:01.000Z"       // ISO 8601
+  "timestamp": "2025-10-22T14:30:01.000Z",      // ISO 8601
+  "metadata": {
+    "responseType": "legal_answer",              // or "document_link", "document_summary", "not_found"
+    "country": "Burkina Faso",
+    "sources": [                                 // Legal documents used
+      {"document": "ARRETE_016_2023_ALT", "relevance": 0.95}
+    ]
+  }
 }
 ```
 
