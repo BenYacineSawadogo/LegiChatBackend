@@ -243,18 +243,8 @@ def process_question_with_context(conversation_id, new_message):
                 texte_complet = extract_text_from_pdf(chemin_pdf)
                 prompt_messages = [
                     {
-                        "role": "system",
-                        "content": "Tu es un assistant juridique spécialisé dans les textes juridiques du Burkina Faso. Tu dois faire des résumés clairs, structurés et factuels."
-                    },
-                    {
                         "role": "user",
-                        "content": (
-                            f"Voici le contenu d'un texte juridique burkinabè :\n\n{texte_complet}\n\n"
-                            "Fais un résumé structuré de ce document en présentant :\n"
-                            "1. L'objet du texte\n"
-                            "2. Les points clés\n"
-                            "3. Les dispositions importantes"
-                        )
+                        "content": f"Voici le contenu d'un texte juridique du Burkina Faso :\n\n{texte_complet}\n\nFais un résumé clair et structuré de ce document."
                     }
                 ]
                 summary = generate_mistral_complete(prompt_messages)
@@ -291,20 +281,7 @@ def process_question_with_context(conversation_id, new_message):
     mistral_messages = [
         {
             "role": "system",
-            "content": """Tu es un assistant juridique spécialisé en droit burkinabè (Burkina Faso).
-
-RÈGLES STRICTES :
-1. Utilise UNIQUEMENT les informations du contexte juridique fourni ci-dessous
-2. Ne JAMAIS inventer ou supposer des informations qui ne sont pas dans le contexte
-3. Si l'information demandée n'est pas dans le contexte, réponds : "Je n'ai pas trouvé cette information dans les textes juridiques disponibles du Burkina Faso"
-4. Cite PRÉCISÉMENT les articles, lois, décrets et arrêtés du Burkina Faso en utilisant leur numéro exact
-5. Structure tes réponses clairement avec des paragraphes et des sections
-
-FORMAT DE RÉPONSE :
-- Commence par une réponse directe à la question
-- Cite les références légales exactes (ex: "Selon l'article 5 de l'arrêté n°016/2023")
-- Utilise des paragraphes distincts pour chaque point
-- Sois précis, factuel et professionnel"""
+            "content": "Tu es un assistant juridique spécialisé en droit burkinabè (Burkina Faso). Réponds de manière précise en citant les articles et les lois utilisés."
         }
     ]
 
@@ -319,7 +296,7 @@ FORMAT DE RÉPONSE :
     # Ajouter le nouveau message avec le contexte
     mistral_messages.append({
         "role": "user",
-        "content": f"CONTEXTE JURIDIQUE (Burkina Faso) :\n{contexte}\n\nQUESTION : {new_message}\n\nRappel : Utilise UNIQUEMENT les informations du contexte ci-dessus."
+        "content": f"Contexte juridique :\n{contexte}\n\nQuestion : {new_message}"
     })
 
     response = generate_mistral_complete(mistral_messages)
