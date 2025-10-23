@@ -1,4 +1,5 @@
-from flask import Flask, render_template, request, Response, session
+from flask import Flask, render_template, request, Response, session, jsonify
+from flask_cors import CORS
 import time
 import re
 import pickle
@@ -14,6 +15,8 @@ from pdf2image import convert_from_path
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 from mistralai import Mistral
+from datetime import datetime
+from collections import defaultdict
 
 
 # ==========================================================
@@ -21,6 +24,12 @@ from mistralai import Mistral
 # ==========================================================
 app = Flask(__name__)
 app.secret_key = "resume_secret_key"
+
+# Configuration CORS pour le frontend Angular
+CORS(app, origins=["http://localhost:4200"], supports_credentials=True)
+
+# Stockage en mémoire des conversations (remplacer par DB en production)
+conversations_history = defaultdict(list)
 
 
 # ==========================================================
@@ -148,12 +157,248 @@ def generate_mistral_stream(prompt):
         time.sleep(0.1)
 
 
+def generate_mistral_complete(messages):
+    """
+    Génère une réponse complète (non-streaming) à partir d'un historique de messages.
+
+    Args:
+        messages: Liste de messages au format [{"role": "user|assistant", "content": "..."}]
+
+    Returns:
+        str: Réponse complète de Mistral
+    """
+    response = client.chat.complete(
+        model=mistral_model,
+        messages=messages
+    )
+    full_text = response.choices[0].message.content
+
+    # Nettoyage du texte
+    cleaned_text = re.sub(r"#+\s*", "", full_text)
+    return cleaned_text
+
+
+def generate_message_id():
+    """Génère un ID unique pour un message."""
+    import random
+    timestamp = int(datetime.now().timestamp() * 1000)
+    random_part = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=9))
+    return f"msg-{timestamp}-{random_part}"
+
+
+def process_question_with_context(conversation_id, new_message):
+    """
+    Traite une question en utilisant le contexte de la conversation.
+
+    Args:
+        conversation_id: ID de la conversation
+        new_message: Nouveau message utilisateur
+
+    Returns:
+        tuple: (réponse de l'assistant, type de réponse, sources utilisées)
+    """
+    # Récupérer l'historique de la conversation
+    history = conversations_history[conversation_id]
+
+    # Détecter le type de question
+    type_question = detecte_type_question(new_message)
+
+    # === Cas recherche de document ===
+    if type_question == "recherche":
+        type_texte, numero = extraire_reference_loi_decret(new_message)
+        lien_pdf = rechercher_dans_metadatas(type_texte, numero, metadatas)
+
+        if lien_pdf:
+            response = (
+                f"📄 Voici le document demandé : "
+                f'<a href="{lien_pdf}" target="_blank">cliquer ici</a><br>'
+                f"Souhaitez-vous un résumé ? (oui/non)"
+            )
+            # Stocker la référence dans l'historique pour usage ultérieur
+            conversations_history[conversation_id].append({
+                "type": "reference",
+                "lien": lien_pdf,
+                "type_texte": type_texte,
+                "numero": numero
+            })
+            sources = [{"type": type_texte, "numero": numero, "lien": lien_pdf}]
+            return response, "document_link", sources
+        else:
+            return "❌ Référence non trouvée dans les métadonnées.", "not_found", []
+
+    # === Cas résumé (si l'utilisateur répond oui après une recherche de doc) ===
+    if new_message.lower() in ["oui", "oui merci", "résume", "résume-moi", "je veux un résumé"]:
+        # Chercher la dernière référence dans l'historique
+        last_reference = None
+        for item in reversed(history):
+            if isinstance(item, dict) and item.get("type") == "reference":
+                last_reference = item
+                break
+
+        if last_reference:
+            nom_fichier = last_reference["lien"].split("/")[-1]
+            chemin_pdf = f"./static/pdfs/{nom_fichier}"
+
+            try:
+                texte_complet = extract_text_from_pdf(chemin_pdf)
+                prompt_messages = [
+                    {
+                        "role": "user",
+                        "content": f"Voici le contenu d'un texte juridique du Burkina Faso :\n\n{texte_complet}\n\nFais un résumé clair et structuré de ce document."
+                    }
+                ]
+                summary = generate_mistral_complete(prompt_messages)
+                sources = [{
+                    "type": last_reference.get("type_texte"),
+                    "numero": last_reference.get("numero"),
+                    "lien": last_reference["lien"]
+                }]
+                return summary, "document_summary", sources
+            except Exception as e:
+                return f"❌ Impossible de générer le résumé : {str(e)}", "error", []
+
+    # === Cas demande explicative (RAG avec FAISS) ===
+    question_embedding = encodeur(new_message)
+    sims = cosine_similarity([question_embedding], embeddings)[0]
+    top_k = np.argsort(sims)[-10:][::-1]
+    articles_selectionnes = [textes[i] for i in top_k]
+
+    # Extraire les noms de documents sources pour les métadonnées
+    sources = []
+    for i in top_k:
+        texte = textes[i]
+        # Extraire le nom du document (première partie avant "article")
+        doc_name = texte.split(" article ")[0] if " article " in texte else "Document juridique"
+        if doc_name not in [s.get("document") for s in sources]:
+            sources.append({"document": doc_name, "relevance": float(sims[i])})
+
+    # Limiter à 5 sources principales
+    sources = sources[:5]
+
+    contexte = "\n\n".join(articles_selectionnes)
+
+    # Construire l'historique de messages pour Mistral
+    mistral_messages = [
+        {
+            "role": "system",
+            "content": "Tu es un assistant juridique spécialisé en droit burkinabè (Burkina Faso). Réponds de manière précise en citant les articles et les lois utilisés."
+        }
+    ]
+
+    # Ajouter l'historique de la conversation (seulement les messages user/assistant, pas les références)
+    for item in history:
+        if isinstance(item, dict) and "role" in item:
+            mistral_messages.append({
+                "role": item["role"],
+                "content": item["content"]
+            })
+
+    # Ajouter le nouveau message avec le contexte
+    mistral_messages.append({
+        "role": "user",
+        "content": f"Contexte juridique :\n{contexte}\n\nQuestion : {new_message}"
+    })
+
+    response = generate_mistral_complete(mistral_messages)
+    return response, "legal_answer", sources
+
+
 # ==========================================================
 # 🌐 Routes Flask
 # ==========================================================
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/chat", methods=["POST", "OPTIONS"])
+def api_chat():
+    """
+    Endpoint principal pour le frontend Angular.
+
+    Requête:
+        {
+            "conversationId": "conv-1729459200-k8j3h2l9q",
+            "message": "Quelle est la procédure..."
+        }
+
+    Réponse:
+        {
+            "id": "msg-1729459201-xyz789",
+            "conversationId": "conv-1729459200-k8j3h2l9q",
+            "content": "Pour créer une entreprise...",
+            "role": "assistant",
+            "timestamp": "2025-10-22T14:30:01.000Z"
+        }
+    """
+    # Gérer les requêtes OPTIONS pour CORS
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        # 1. Extraire et valider les données
+        data = request.get_json()
+
+        if not data:
+            return jsonify({"error": "Request body must be JSON"}), 400
+
+        conversation_id = data.get("conversationId", "").strip()
+        message = data.get("message", "").strip()
+
+        # Validation
+        if not conversation_id:
+            return jsonify({"error": "conversationId is required"}), 400
+
+        if not message:
+            return jsonify({"error": "message is required"}), 400
+
+        if len(message) > 5000:
+            return jsonify({"error": "message is too long (max 5000 characters)"}), 400
+
+        # 2. Sauvegarder le message utilisateur dans l'historique
+        conversations_history[conversation_id].append({
+            "role": "user",
+            "content": message
+        })
+
+        # 3. Traiter la question avec contexte et récupérer les métadonnées
+        ai_response, response_type, sources = process_question_with_context(conversation_id, message)
+
+        # 4. Générer un ID pour le message assistant
+        assistant_message_id = generate_message_id()
+
+        # 5. Sauvegarder la réponse dans l'historique
+        conversations_history[conversation_id].append({
+            "role": "assistant",
+            "content": ai_response
+        })
+
+        # 6. Retourner la réponse structurée au format attendu par le frontend
+        response_data = {
+            "id": assistant_message_id,
+            "conversationId": conversation_id,
+            "content": ai_response,
+            "role": "assistant",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "metadata": {
+                "responseType": response_type,
+                "country": "Burkina Faso",
+                "sources": sources
+            }
+        }
+
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        # Log l'erreur pour le debugging
+        print(f"❌ Error in /api/chat: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+        return jsonify({
+            "error": "An error occurred processing your request",
+            "details": str(e) if app.debug else None
+        }), 500
 
 
 @app.route("/stream", methods=["POST"])
